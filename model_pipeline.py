@@ -91,7 +91,7 @@ grid_lr.fit(X_train, y_train)
 best_lr = grid_lr.best_estimator_
 
 # ---------------------------------------------------------------
-# 5. MODEL 2: RANDOM FOREST (+ grid search)
+# 5A. MODEL 2: RANDOM FOREST (+ grid search)
 # ---------------------------------------------------------------
 pipe_rf = Pipeline([
     ("preprocessor", preprocessor),
@@ -108,7 +108,29 @@ grid_rf.fit(X_train, y_train)
 best_rf = grid_rf.best_estimator_
 
 # ---------------------------------------------------------------
-# 6. TEST-SET EVALUATION
+# 5B. MODEL 3: XGBOOST (+ grid search)
+# ---------------------------------------------------------------
+from xgboost import XGBClassifier
+
+neg, pos = (y_train == 0).sum(), (y_train == 1).sum()
+scale_pos_weight = neg / pos
+
+pipe_xgb = Pipeline([
+    ("preprocessor", preprocessor),
+    ("classifier", XGBClassifier(objective="binary:logistic", eval_metric="logloss",
+                                  scale_pos_weight=scale_pos_weight, random_state=RANDOM_STATE)),
+])
+grid_xgb = GridSearchCV(
+    pipe_xgb,
+    param_grid={"classifier__n_estimators": [200, 400], "classifier__max_depth": [3, 4, 5],
+                "classifier__learning_rate": [0.03, 0.1], "classifier__subsample": [0.8, 1.0]},
+    cv=5, scoring="f1", n_jobs=-1,
+)
+grid_xgb.fit(X_train, y_train)
+best_xgb = grid_xgb.best_estimator_
+
+# ---------------------------------------------------------------
+# 6A. TEST-SET EVALUATION
 # ---------------------------------------------------------------
 def evaluate(model, name):
     preds = model.predict(X_test)
@@ -128,6 +150,24 @@ def evaluate(model, name):
 
 res_lr = evaluate(best_lr, "Logistic Regression")
 res_rf = evaluate(best_rf, "Random Forest")
+
+# ---------------------------------------------------------------
+# 6B. THRESHOLD OPTIMIZATION (avoids leakage: tuned on training
+# out-of-fold predictions only, then applied once to the test set)
+# ---------------------------------------------------------------
+from sklearn.model_selection import cross_val_predict, StratifiedKFold
+from sklearn.metrics import precision_recall_curve
+
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+oof_probs = cross_val_predict(best_rf, X_train, y_train, cv=cv, method="predict_proba", n_jobs=-1)[:, 1]
+
+prec, rec, thresholds = precision_recall_curve(y_train, oof_probs)
+f1_scores = 2 * prec[:-1] * rec[:-1] / (prec[:-1] + rec[:-1] + 1e-12)
+best_threshold = thresholds[np.argmax(f1_scores)]
+
+# Apply the training-derived threshold to the untouched test set
+test_probs = best_rf.predict_proba(X_test)[:, 1]
+tuned_preds = (test_probs >= best_threshold).astype(int)
 
 # ---------------------------------------------------------------
 # 7. FEATURE IMPORTANCE (Random Forest, mean decrease in impurity)
